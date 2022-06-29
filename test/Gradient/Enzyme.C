@@ -1,15 +1,23 @@
-
-// RUN: %cladclang %s -lstdc++ -I%S/../../include -oEnzyme.out 2>&1 | FileCheck %s
-// RUN: ./Enzyme.out
+// RUN: %cladclang %s -I%S/../../include -S -emit-llvm -o input.ll -O2 -fno-vectorize -fno-slp-vectorize -fno-unroll-loops | FileCheck %s 
+// RUN: %cladopt input.ll -load=%S/../../../inst/EnzymeAD/src/Enzyme-build/Enzyme/LLVMEnzyme-%clad_llvm_version.so -enzyme -o output.ll -S --enable-new-pm=0 
+// RUN: %cladopt output.ll -O2 -o output_opt.ll -S
+// RUN: clang output_opt.ll -o Enzyme.out -lstdc++ -lm
+// RUN: ./Enzyme.out | FileCheck -check-prefix=CHECK-EXEC %s
 // CHECK-NOT: {{.*error|warning|note:.*}}
 
 #include "clad/Differentiator/Differentiator.h"
 
-double f(double x, double y) { return x * y; }
+double f(double* arr) { return arr[0] * arr[1]; }
 
-// CHECK:  void f_grad_enzyme(double x, double y, clad::array_ref<double> _d_x, clad::array_ref<double> _d_y) {
+// CHECK: void f_grad_enzyme(double *arr, clad::array_ref<double> _d_arr) {
+// CHECK-NEXT:    double *d_arr = _d_arr.ptr();
+// CHECK-NEXT:    __enzyme_autodiff_f(f, arr, d_arr);
 // CHECK-NEXT:}
 
 int main(){
-     auto f_dx = clad::gradient<clad::opts::use_enzyme>(f);
+  auto f_grad = clad::gradient<clad::opts::use_enzyme>(f);
+  double v[2] = {3, 4};
+  double g[2] = {0};
+  f_grad.execute(v, g);
+  printf("d_x = %.2f, d_y = %.2f", g[0], g[1]); // CHECK-EXEC: d_x = 4.00, d_y = 3.00
 }

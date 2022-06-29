@@ -638,6 +638,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=$([[ -z "$BUILD_TYPE" ]] && echo RelWithDebInfo || echo $BUILD_TYPE) \
           -DCODE_COVERAGE=${CODE_COVERAGE}  \
           -DLLVM_EXTERNAL_LIT="`which lit`" \
+          -DENZYME=On                       \
           $GITHUB_WORKSPACE                 \
           ${{ matrix.extra_cmake_options }}
 
@@ -652,6 +653,7 @@ jobs:
             cmake -DClang_DIR="$PATH_TO_LLVM_BUILD" \
               -DLLVM_DIR="$PATH_TO_LLVM_BUILD" \
               -DCMAKE_BUILD_TYPE=$([[ -z "$BUILD_TYPE" ]] && echo RelWithDebInfo || echo $BUILD_TYPE) \
+              -DENZYME=On                       \
               $GITHUB_WORKSPACE
             cov-build --dir cov-out cmake --build .  -- -j4
           else
