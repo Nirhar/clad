@@ -308,3 +308,24 @@ if (TARGET clangBasic)
   add_dependencies(clad clangBasic)
 endif()
 
+
+#Check if Enzyme must be tested
+if (ENABLE_ENZYME_BACKEND)
+  include(ExternalProject)
+  set(ENZYME_INSTALL_LOCATION ${CMAKE_SOURCE_DIR}/EnzymeAD) 
+  ExternalProject_Add(
+    Enzyme 
+    PREFIX ${ENZYME_INSTALL_LOCATION}
+    SOURCE_SUBDIR enzyme
+    GIT_REPOSITORY https://github.com/wsmoses/Enzyme
+    GIT_TAG v0.0.33
+    GIT_PROGRESS TRUE
+    UPDATE_COMMAND ""
+    CMAKE_ARGS -DLLVM_DIR=${LLVM_DIR} -DLLVM_EXTERNAL_LIT=${LLVM_EXTERNAL_LIT}
+    INSTALL_COMMAND ""
+    TEST_COMMAND make check-enzyme
+  )
+  add_dependencies(clad Enzyme)
+  message(STATUS "Added Enzyme as a Dependency")
+endif()
+
