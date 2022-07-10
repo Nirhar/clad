@@ -477,11 +477,11 @@ namespace clad {
       // Case 1: The function to be differentiated is of type double
       // func(double* arr){...};
       //        or double func(double arr[n]){...};
-      if (num_params == 1) {
-        QualType type = orig_params[0]->getOriginalType();
-        const clang::Type* t_ptr = type.getTypePtr();
-        if (dyn_cast_or_null<ConstantArrayType>(t_ptr) ||
+      QualType type = orig_params[0]->getOriginalType();
+      const clang::Type* t_ptr = type.getTypePtr();
+      if (dyn_cast_or_null<ConstantArrayType>(t_ptr) ||
             dyn_cast_or_null<PointerType>(t_ptr)) {
+        if (num_params == 1) {
           // Extract Pointer from Clad Array Ref
           auto arrayRefNameExpr = m_Sema.BuildDeclRefExpr(
               dyn_cast<ValueDecl>(paramsRef[1]), paramsRef[1]->getType(),
@@ -541,6 +541,78 @@ namespace clad {
           Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
           addToCurrentBlock(enzyme_call);
         }
+      }else{
+        //Build params and arguments for Enzyme function call
+        llvm::SmallVector<Expr*, 16> enz_args;
+        llvm::SmallVector<ParmVarDecl*, 16> enz_params;
+        enz_args.push_back(m_Sema.BuildDeclRefExpr(
+              dyn_cast<ValueDecl>(const_cast<FunctionDecl*>(FD)), FD->getType(),
+              VK_LValue, noLoc));
+        enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
+              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+              FD->getType()));
+
+        for(int i=0;i<num_params;i++){
+          enz_args.push_back(m_Sema.BuildDeclRefExpr(
+              dyn_cast<ValueDecl>(paramsRef[i]), paramsRef[i]->getType(),
+              VK_LValue, noLoc));
+          enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
+              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+              paramsRef[i]->getType()));
+        }
+        llvm::SmallVector<QualType, 16> enz_params_type;
+        for (auto i : enz_params)
+          enz_params_type.push_back(i->getType());
+
+        // Prepare Function call
+        std::string enzyme_call_name =
+            "__enzyme_autodiff_" + FD->getNameAsString();
+        IdentifierInfo* II_Enz = &m_Context.Idents.get(enzyme_call_name);
+        DeclarationName name_enz(II_Enz);
+
+        QualType enzymeFunctionType = m_Sema.BuildFunctionType(
+            m_Context.VoidTy, enz_params_type, noLoc, name_enz,
+            originalFnType->getExtProtoInfo());
+
+        FunctionDecl* enzyme_call_FD = FunctionDecl::Create(
+            m_Context, const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+            noLoc, name_enz, enzymeFunctionType, FD->getTypeSourceInfo(),
+            SC_Extern);
+        enzyme_call_FD->setParams(enz_params);
+
+        // Create Function call to enzyme autodiff
+        Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
+
+        //Find the Gradient datastructure
+        NamespaceDecl* CladNS = GetCladNamespace();
+        CXXScopeSpec CSS;
+        CSS.Extend(m_Context, CladNS, noLoc, noLoc);
+        DeclarationName grad_ident = &m_Context.Idents.get("Gradient");
+        LookupResult GradR(m_Sema,
+                       grad_ident,
+                       noLoc,
+                       Sema::LookupUsingDeclName,
+                       clad_compat::Sema_ForVisibleRedeclaration);
+        // m_Sema.LookupQualifiedName(GradR, CladNS, CSS);
+        // assert(!GradR.empty() && isa<TemplateDecl>(GradR.getFoundDecl()) &&
+        //    "cannot find clad::Gradient");
+
+        // auto gradDecl=cast<TemplateDecl>(GradR.getFoundDecl());
+        // gradDecl->dump();
+        // auto gradInstant = m_Sema.BuildVarTemplateInstantiation(
+        //               gradDecl,
+
+        //         )
+        TemplateArgumentListInfo gradTemplatArgList;
+        gradTemplatArgList.addArgument(
+          TemplateArgumentLoc(TemplateArgument(m_Context,llvm::APSInt("3"),m_Context.IntTy),TemplateArgumentLocInfo()));
+        auto gradResult = m_Sema.BuildTemplateIdExpr(CSS,
+                                noLoc,
+                                GradR,
+                                true,
+                                &gradTemplatArgList
+                      );
+        gradResult.get()->dump();
       }
       gradientBody = endBlock();
     }
