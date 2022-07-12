@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <numeric>
+#include <iostream>
 
 #include "clad/Differentiator/CladUtils.h"
 #include "clad/Differentiator/Compatibility.h"
@@ -564,6 +565,29 @@ namespace clad {
         for (auto i : enz_params)
           enz_params_type.push_back(i->getType());
 
+        //Find the Gradient datastructure
+        NamespaceDecl* CladNS = GetCladNamespace();
+        CXXScopeSpec CSS;
+        CSS.Extend(m_Context, CladNS, noLoc, noLoc);
+        NestedNameSpecifier* NS = CSS.getScopeRep();
+        DeclarationName grad_ident = &m_Context.Idents.get("Gradient");
+        LookupResult GradR(m_Sema,
+                       grad_ident,
+                       noLoc,
+                       Sema::LookupUsingDeclName,
+                       clad_compat::Sema_ForVisibleRedeclaration);
+        m_Sema.LookupQualifiedName(GradR, CladNS, CSS);
+        assert(!GradR.empty() && isa<TemplateDecl>(GradR.getFoundDecl()) &&
+           "cannot find clad::Gradient");
+
+        auto gradDecl=cast<TemplateDecl>(GradR.getFoundDecl());
+        TemplateArgumentListInfo TLI{};
+        llvm::APSInt argValue(std::to_string(num_params));
+        TemplateArgument TA(m_Context, argValue,m_Context.UnsignedIntTy);
+        TLI.addArgument(TemplateArgumentLoc(TA, TemplateArgumentLocInfo()));
+        QualType TT =
+        m_Context.getElaboratedType(ETK_None, NS,m_Sema.CheckTemplateIdType(TemplateName(gradDecl), noLoc, TLI));
+
         // Prepare Function call
         std::string enzyme_call_name =
             "__enzyme_autodiff_" + FD->getNameAsString();
@@ -571,7 +595,7 @@ namespace clad {
         DeclarationName name_enz(II_Enz);
 
         QualType enzymeFunctionType = m_Sema.BuildFunctionType(
-            m_Context.VoidTy, enz_params_type, noLoc, name_enz,
+            TT, enz_params_type, noLoc, name_enz,
             originalFnType->getExtProtoInfo());
 
         FunctionDecl* enzyme_call_FD = FunctionDecl::Create(
@@ -583,36 +607,37 @@ namespace clad {
         // Create Function call to enzyme autodiff
         Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
 
-        //Find the Gradient datastructure
-        NamespaceDecl* CladNS = GetCladNamespace();
-        CXXScopeSpec CSS;
-        CSS.Extend(m_Context, CladNS, noLoc, noLoc);
-        DeclarationName grad_ident = &m_Context.Idents.get("Gradient");
-        LookupResult GradR(m_Sema,
-                       grad_ident,
-                       noLoc,
-                       Sema::LookupUsingDeclName,
-                       clad_compat::Sema_ForVisibleRedeclaration);
-        // m_Sema.LookupQualifiedName(GradR, CladNS, CSS);
-        // assert(!GradR.empty() && isa<TemplateDecl>(GradR.getFoundDecl()) &&
-        //    "cannot find clad::Gradient");
+        auto gradDeclStmt = BuildVarDecl(
+              TT, "grad", enzyme_call,true);
+        addToCurrentBlock(BuildDeclStmt(gradDeclStmt),
+                            direction::forward);
 
-        // auto gradDecl=cast<TemplateDecl>(GradR.getFoundDecl());
-        // gradDecl->dump();
-        // auto gradInstant = m_Sema.BuildVarTemplateInstantiation(
-        //               gradDecl,
+      
+        for(int i=0;i<num_params;i++){
+          auto LHSExpr = BuildOp(UO_Deref,m_Sema.BuildDeclRefExpr(
+              dyn_cast<ValueDecl>(paramsRef[num_params+i]), paramsRef[num_params+i]->getType(),
+              VK_LValue, noLoc));
+          
+          UnqualifiedId Member;
+          Member.setIdentifier(&m_Context.Idents.get("d_arr"), noLoc);
+          CXXScopeSpec SS;
+          auto gradDeclExpr=m_Sema.BuildDeclRefExpr(dyn_cast<ValueDecl>(gradDeclStmt),gradDeclStmt->getType(),VK_LValue, noLoc);
+          auto ME = m_Sema
+                  .ActOnMemberAccessExpr(getCurrentScope(),
+                                         gradDeclExpr, noLoc,
+                                         tok::TokenKind::period,
+                                         SS, noLoc, Member,
+                                         /*ObjCImpDecl=*/nullptr)
+                  .getAs<MemberExpr>();
+          Expr* grad_index = dyn_cast<Expr>(IntegerLiteral::Create(
+                                    m_Context,llvm::APSInt(std::to_string(i)),
+                                    m_Context.UnsignedIntTy,noLoc));
+          Expr* RHSExpr = m_Sema.CreateBuiltinArraySubscriptExpr(ME, noLoc, grad_index, noLoc).get();
 
-        //         )
-        TemplateArgumentListInfo gradTemplatArgList;
-        gradTemplatArgList.addArgument(
-          TemplateArgumentLoc(TemplateArgument(m_Context,llvm::APSInt("3"),m_Context.IntTy),TemplateArgumentLocInfo()));
-        auto gradResult = m_Sema.BuildTemplateIdExpr(CSS,
-                                noLoc,
-                                GradR,
-                                true,
-                                &gradTemplatArgList
-                      );
-        gradResult.get()->dump();
+          auto assignExpr = BuildOp(BO_Assign,LHSExpr,RHSExpr);
+          addToCurrentBlock(assignExpr,
+                            direction::forward);
+        }
       }
       gradientBody = endBlock();
     }
@@ -622,7 +647,7 @@ namespace clad {
     m_Sema.PopFunctionScopeInfo();
     m_Sema.PopDeclContext();
     endScope(); // Function decl scope
-
+    gradientBody->dumpPretty(m_Context);
     FunctionDecl* gradientOverloadFD = nullptr;
     if (shouldCreateOverload) {
       gradientOverloadFD =
