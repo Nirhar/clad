@@ -458,8 +458,6 @@ namespace clad {
 
       if (m_ExternalSource)
         m_ExternalSource->ActOnEndOfDerivedFnBody();
-
-      gradientBody = endBlock();
     } else {
       // TODO: Write code to generate code that enzyme can work on
       /*
@@ -475,96 +473,73 @@ namespace clad {
       unsigned num_params = m_Function->getNumParams();
       auto orig_params = m_Function->parameters();
 
-      // Case 1: The function to be differentiated is of type double
-      // func(double* arr){...};
-      //        or double func(double arr[n]){...};
-      QualType type = orig_params[0]->getOriginalType();
-      const clang::Type* t_ptr = type.getTypePtr();
-      if (dyn_cast_or_null<ConstantArrayType>(t_ptr) ||
-            dyn_cast_or_null<PointerType>(t_ptr)) {
-        if (num_params == 1) {
-          // Extract Pointer from Clad Array Ref
-          auto arrayRefNameExpr = m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(paramsRef[1]), paramsRef[1]->getType(),
-              VK_LValue, noLoc);
 
-          auto getPointerExpr =
-              BuildCallExprToMemFn(arrayRefNameExpr, "ptr", {});
-          auto ArrayRefToArrayStmt = BuildVarDecl(
-              type, "d_" + paramsRef[0]->getNameAsString(), getPointerExpr);
-          addToCurrentBlock(BuildDeclStmt(ArrayRefToArrayStmt),
-                            direction::forward);
-
-          // Prepare Arguments to enzyme_autodiff
-          llvm::SmallVector<Expr*, 16> enz_args;
-          enz_args.push_back(m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(const_cast<FunctionDecl*>(FD)), FD->getType(),
-              VK_LValue, noLoc));
-          enz_args.push_back(m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(paramsRef[0]), paramsRef[0]->getType(),
-              VK_LValue, noLoc));
-          enz_args.push_back(m_Sema.BuildDeclRefExpr(
-              ArrayRefToArrayStmt, ArrayRefToArrayStmt->getType(), VK_LValue,
-              noLoc));
-          // Prepare Parameters for Function Signature
-          llvm::SmallVector<ParmVarDecl*, 16> enz_params;
-          enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
-              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              FD->getType()));
-          enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
-              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              paramsRef[0]->getType()));
-          enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
-              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              ArrayRefToArrayStmt->getType()));
-
-          llvm::SmallVector<QualType, 8> enz_params_type;
-          for (auto i : enz_params)
-            enz_params_type.push_back(i->getType());
-
-          // Prepare Function call
-          std::string enzyme_call_name =
-              "__enzyme_autodiff_" + FD->getNameAsString();
-          IdentifierInfo* II_Enz = &m_Context.Idents.get(enzyme_call_name);
-          DeclarationName name_enz(II_Enz);
-
-          QualType enzymeFunctionType = m_Sema.BuildFunctionType(
-              m_Context.VoidTy, enz_params_type, noLoc, name_enz,
-              originalFnType->getExtProtoInfo());
-
-          FunctionDecl* enzyme_call_FD = FunctionDecl::Create(
-              m_Context, const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              noLoc, name_enz, enzymeFunctionType, FD->getTypeSourceInfo(),
-              SC_Extern);
-          enzyme_call_FD->setParams(enz_params);
-
-          // Add Function call to block
-          Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
-          addToCurrentBlock(enzyme_call);
+      // Extract Pointer from Clad Array Ref
+      llvm::SmallVector<VarDecl*,8> clad_ref_params;  
+      for(int i=0;i<num_params;i++){
+        QualType param_type=orig_params[i]->getOriginalType();
+        if(!param_type.getTypePtr()->isPointerType()){
+          clad_ref_params.push_back(nullptr);
+          continue;
         }
-      }else{
-        //Build params and arguments for Enzyme function call
-        llvm::SmallVector<Expr*, 16> enz_args;
-        llvm::SmallVector<ParmVarDecl*, 16> enz_params;
+        auto arrayRefNameExpr = m_Sema.BuildDeclRefExpr(
+            dyn_cast<ValueDecl>(paramsRef[num_params+i]), paramsRef[num_params+i]->getType(),
+            VK_LValue, noLoc);
+
+        auto getPointerExpr =
+            BuildCallExprToMemFn(arrayRefNameExpr, "ptr", {});
+        auto ArrayRefToArrayStmt = BuildVarDecl(
+            param_type, "d_" + paramsRef[i]->getNameAsString(), getPointerExpr);
+        addToCurrentBlock(BuildDeclStmt(ArrayRefToArrayStmt),
+                          direction::forward);
+        clad_ref_params.push_back(ArrayRefToArrayStmt);
+      }    
+      // Prepare Arguments and Parameters to enzyme_autodiff
+      // First add the function itself
+      llvm::SmallVector<Expr*, 16> enz_args;
+      llvm::SmallVector<ParmVarDecl*, 16> enz_params;
+      llvm::SmallVector<ParmVarDecl*, 16> enz_real_params;
+      llvm::SmallVector<ParmVarDecl*, 16> enz_real_params_ref;
+      enz_args.push_back(m_Sema.BuildDeclRefExpr(
+          dyn_cast<ValueDecl>(const_cast<FunctionDecl*>(FD)), FD->getType(),
+          VK_LValue, noLoc));
+      enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
+          const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+          FD->getType()));
+
+
+      for(int i=0;i<num_params;i++){
+        //First Add the original parameter
         enz_args.push_back(m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(const_cast<FunctionDecl*>(FD)), FD->getType(),
-              VK_LValue, noLoc));
+          dyn_cast<ValueDecl>(paramsRef[i]), paramsRef[i]->getType(),
+          VK_LValue, noLoc));
         enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
-              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              FD->getType()));
+          const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+          paramsRef[i]->getType()));
 
-        for(int i=0;i<num_params;i++){
-          enz_args.push_back(m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(paramsRef[i]), paramsRef[i]->getType(),
-              VK_LValue, noLoc));
-          enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
-              const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-              paramsRef[i]->getType()));
+        if(clad_ref_params[i]==nullptr){
+          if(paramsRef[i]->getOriginalType().getTypePtr()->isRealFloatingType()){
+            enz_real_params.push_back(paramsRef[i]);
+            enz_real_params_ref.push_back(paramsRef[num_params+i]);
+          }
+          continue;
         }
-        llvm::SmallVector<QualType, 16> enz_params_type;
-        for (auto i : enz_params)
-          enz_params_type.push_back(i->getType());
-
+          
+        //Then add the corresponding clad array ref pointer variable
+        enz_args.push_back(m_Sema.BuildDeclRefExpr(
+          clad_ref_params[i], clad_ref_params[i]->getType(), VK_LValue,
+          noLoc));
+        enz_params.push_back(m_Sema.BuildParmVarDeclForTypedef(
+          const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+          clad_ref_params[i]->getType()));
+      }   
+      
+      llvm::SmallVector<QualType, 16> enz_params_type;
+      for (auto i : enz_params)
+        enz_params_type.push_back(i->getType());
+      
+      QualType TT;
+      if(enz_real_params.size()!=0){
         //Find the Gradient datastructure
         NamespaceDecl* CladNS = GetCladNamespace();
         CXXScopeSpec CSS;
@@ -572,50 +547,50 @@ namespace clad {
         NestedNameSpecifier* NS = CSS.getScopeRep();
         DeclarationName grad_ident = &m_Context.Idents.get("Gradient");
         LookupResult GradR(m_Sema,
-                       grad_ident,
-                       noLoc,
-                       Sema::LookupUsingDeclName,
-                       clad_compat::Sema_ForVisibleRedeclaration);
+                      grad_ident,
+                      noLoc,
+                      Sema::LookupUsingDeclName,
+                      clad_compat::Sema_ForVisibleRedeclaration);
         m_Sema.LookupQualifiedName(GradR, CladNS, CSS);
         assert(!GradR.empty() && isa<TemplateDecl>(GradR.getFoundDecl()) &&
-           "cannot find clad::Gradient");
+          "cannot find clad::Gradient");
 
         auto gradDecl=cast<TemplateDecl>(GradR.getFoundDecl());
         TemplateArgumentListInfo TLI{};
-        llvm::APSInt argValue(std::to_string(num_params));
+        llvm::APSInt argValue(std::to_string(enz_real_params.size()));
         TemplateArgument TA(m_Context, argValue,m_Context.UnsignedIntTy);
         TLI.addArgument(TemplateArgumentLoc(TA, TemplateArgumentLocInfo()));
-        QualType TT =
+        TT =
         m_Context.getElaboratedType(ETK_None, NS,m_Sema.CheckTemplateIdType(TemplateName(gradDecl), noLoc, TLI));
+      }else{
+        TT=m_Context.VoidTy;
+      }
+      // Prepare Function call
+      std::string enzyme_call_name =
+          "__enzyme_autodiff_" + FD->getNameAsString();
+      IdentifierInfo* II_Enz = &m_Context.Idents.get(enzyme_call_name);
+      DeclarationName name_enz(II_Enz);
 
-        // Prepare Function call
-        std::string enzyme_call_name =
-            "__enzyme_autodiff_" + FD->getNameAsString();
-        IdentifierInfo* II_Enz = &m_Context.Idents.get(enzyme_call_name);
-        DeclarationName name_enz(II_Enz);
+      QualType enzymeFunctionType = m_Sema.BuildFunctionType(
+          TT, enz_params_type, noLoc, name_enz,
+          originalFnType->getExtProtoInfo());
 
-        QualType enzymeFunctionType = m_Sema.BuildFunctionType(
-            TT, enz_params_type, noLoc, name_enz,
-            originalFnType->getExtProtoInfo());
+      FunctionDecl* enzyme_call_FD = FunctionDecl::Create(
+          m_Context, const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
+          noLoc, name_enz, enzymeFunctionType, FD->getTypeSourceInfo(),
+          SC_Extern);
+      enzyme_call_FD->setParams(enz_params);
+      Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
 
-        FunctionDecl* enzyme_call_FD = FunctionDecl::Create(
-            m_Context, const_cast<DeclContext*>(FD->getDeclContext()), noLoc,
-            noLoc, name_enz, enzymeFunctionType, FD->getTypeSourceInfo(),
-            SC_Extern);
-        enzyme_call_FD->setParams(enz_params);
-
-        // Create Function call to enzyme autodiff
-        Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
-
+      if(enz_real_params.size()!=0){
         auto gradDeclStmt = BuildVarDecl(
-              TT, "grad", enzyme_call,true);
+            TT, "grad", enzyme_call,true);
         addToCurrentBlock(BuildDeclStmt(gradDeclStmt),
-                            direction::forward);
+                          direction::forward);
 
-      
-        for(int i=0;i<num_params;i++){
+        for(int i=0;i<enz_real_params.size();i++){
           auto LHSExpr = BuildOp(UO_Deref,m_Sema.BuildDeclRefExpr(
-              dyn_cast<ValueDecl>(paramsRef[num_params+i]), paramsRef[num_params+i]->getType(),
+              dyn_cast<ValueDecl>(enz_real_params_ref[i]), enz_real_params_ref[i]->getType(),
               VK_LValue, noLoc));
           
           UnqualifiedId Member;
@@ -624,10 +599,10 @@ namespace clad {
           auto gradDeclExpr=m_Sema.BuildDeclRefExpr(dyn_cast<ValueDecl>(gradDeclStmt),gradDeclStmt->getType(),VK_LValue, noLoc);
           auto ME = m_Sema
                   .ActOnMemberAccessExpr(getCurrentScope(),
-                                         gradDeclExpr, noLoc,
-                                         tok::TokenKind::period,
-                                         SS, noLoc, Member,
-                                         /*ObjCImpDecl=*/nullptr)
+                                          gradDeclExpr, noLoc,
+                                          tok::TokenKind::period,
+                                          SS, noLoc, Member,
+                                          /*ObjCImpDecl=*/nullptr)
                   .getAs<MemberExpr>();
           Expr* grad_index = dyn_cast<Expr>(IntegerLiteral::Create(
                                     m_Context,llvm::APSInt(std::to_string(i)),
@@ -638,10 +613,14 @@ namespace clad {
           addToCurrentBlock(assignExpr,
                             direction::forward);
         }
-      }
-      gradientBody = endBlock();
-    }
 
+      }else{
+        // Add Function call to block
+        Expr* enzyme_call = BuildCallExprToFunction(enzyme_call_FD, enz_args);
+        addToCurrentBlock(enzyme_call);
+      }
+    }
+    gradientBody = endBlock();
     m_Derivative->setBody(gradientBody);
     endScope(); // Function body scope
     m_Sema.PopFunctionScopeInfo();
@@ -653,7 +632,7 @@ namespace clad {
       gradientOverloadFD =
           CreateGradientOverload();
     }
-
+   
     return DerivativeAndOverload{result.first, gradientOverloadFD};
   }
 
